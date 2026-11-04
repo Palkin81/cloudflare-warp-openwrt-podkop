@@ -121,6 +121,9 @@ jobs:
           # Конфиг SDK по умолчанию включает CONFIG_ALL/ALL_KMODS. Это раздувает
           # список пакетов до тысяч (в старом sdk.config их было 10911) и тянет
           # лишние загрузки вроде linux-firmware. Оставляем только нужное.
+          # В свежераспакованном SDK файла .config нет (первый запуск упал на этом),
+          # поэтому создаём пустой; значения по умолчанию добавит make defconfig.
+          touch .config
           sed -i -E '/^(# )?CONFIG_(ALL|ALL_KMODS|ALL_NONSHARED)([= ]|$)/d' .config
           cat >> .config <<'EOF'
           # CONFIG_ALL is not set
