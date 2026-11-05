@@ -70,6 +70,22 @@ for pkg in warp-awg warp-warpscout luci-app-warp; do
   esac
   if [[ "$arch" =~ ^($want)$ ]]; then ok "$pkg: arch = $arch"; else bad "$pkg: arch = '${arch:-?}', ожидалось $want"; fi
 
+  # kmod-tun убран из зависимостей сборки (см. workflow), но обязан остаться
+  # зависимостью установки: без него на роутере не будет /dev/net/tun.
+  if [ "$pkg" = warp-awg ]; then
+    dump=$("$APK" adbdump --allow-untrusted "$f" 2>&1)
+    if grep -q 'kmod-tun' <<<"$dump"; then
+      ok "$pkg: зависимость kmod-tun есть в метаданных"
+    else
+      bad "$pkg: в метаданных нет зависимости kmod-tun (EXTRA_DEPENDS не сработал)"
+      head -50 <<<"$dump"
+    fi
+  fi
+
+  # Для наглядности: как зависимости записаны в готовом пакете.
+  echo "--- зависимости $pkg (adbdump):"
+  "$APK" adbdump --allow-untrusted "$f" 2>/dev/null | grep -i -A10 -E '^ *depends:' | head -14
+
   rm -rf "$tmp" "$tmp.log"
 done
 

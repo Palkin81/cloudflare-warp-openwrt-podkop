@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '23 3 * * *'
   push:
-    branches: [ci/x86_64-build]
+    branches: ['ci/**']
 
 permissions:
   contents: write
@@ -109,6 +109,22 @@ jobs:
           chmod 0600 root/etc/config/warp
 
           cp -a warp-awg warp-warpscout "$SDK/package/"
+
+          # kmod-tun нужен только при установке пакета на роутер. Как зависимость
+          # сборки (+kmod-tun в DEPENDS) он заставляет SDK собирать package/kernel/linux,
+          # а вместе с ним linux-firmware (~580 МБ) и nu801. Переносим зависимость в
+          # EXTRA_DEPENDS: в APK она остаётся, но сборку больше не тянет.
+          # Правим копию в SDK, файл в репозитории остаётся как в upstream.
+          mk="$SDK/package/warp-awg/Makefile"
+          if grep -q ' +kmod-tun' "$mk"; then
+            sed -i 's/ +kmod-tun//' "$mk"
+            # SDK 25.12 требует у EXTRA_DEPENDS версионное ограничение, поэтому (>=0).
+            sed -i '/^  DEPENDS:=/a\  EXTRA_DEPENDS:=kmod-tun (>=0)' "$mk"
+          else
+            echo "::warning::В warp-awg/Makefile не найдено ' +kmod-tun': upstream мог изменить зависимости, проверьте ci/ и шаг подмены."
+          fi
+          sed -n '/^define Package\/warp-awg$/,/^endef/p' "$mk"
+
           mkdir -p "$SDK/package/luci-app-warp"
           # po/ не копируем: проверенная сборка тоже была без luci-i18n-warp-ru.
           cp -a Makefile htdocs root "$SDK/package/luci-app-warp/"
@@ -148,6 +164,15 @@ jobs:
           make package/warp-awg/compile V=s -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/warp-awg.log" | tail -n 40
           test "${PIPESTATUS[0]}" -eq 0
           echo "dl/: $(du -sh dl | cut -f1)"
+          ls -laS dl | head -12
+          if ls dl | grep -q '^linux-firmware'; then
+            echo "::warning::linux-firmware всё ещё скачивается при сборке warp-awg (замена зависимости kmod-tun не помогла)."
+          fi
+          # Ищем именно вход в каталог пакета: просто строка package/kernel/linux
+          # встречается и в безобидных сообщениях feeds (ложное срабатывание).
+          if grep -q -E "Entering directory .*(package/kernel/linux|firmware/linux-firmware)" "$GITHUB_WORKSPACE/logs/warp-awg.log"; then
+            echo "::warning::При сборке warp-awg запускалась сборка package/kernel/linux или linux-firmware."
+          fi
 
       - name: Build warp-warpscout
         if: steps.sync.outputs.build == 'true'
