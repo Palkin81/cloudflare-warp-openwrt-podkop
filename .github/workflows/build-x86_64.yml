@@ -1,4 +1,4 @@
-name: Build APK (OpenWrt 25.12.3 x86_64)
+name: Build APK (OpenWrt 25.12.x x86_64)
 
 on:
   workflow_dispatch:
@@ -11,26 +11,22 @@ permissions:
   contents: write
 
 env:
-  SDK_VERSION: '25.12.3'
-  SDK_BASE: https://downloads.openwrt.org/releases/25.12.3/targets/x86/64
-  SDK_ARCHIVE: openwrt-sdk-25.12.3-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-  SDK_DIR: openwrt-sdk-25.12.3-x86-64_gcc-14.3.0_musl.Linux-x86_64
-  # Значение взято из проверенного rebuild.sh; на каждом запуске сверяется
-  # с официальным sha256sums. При расхождении сборка останавливается.
-  SDK_SHA256: 70fc990b2f9a2705e8bbca610e421a55e789901d4aeba10d9fdd7c89777bf695
   UPSTREAM_REPO: https://github.com/moz9/cloudflare-warp-openwrt-podkop.git
 
 jobs:
-  build:
+  # Только для расписания и на main: подтянуть изменения upstream.
+  # Если новых коммитов нет, сборка пропускается. Остальные запуски
+  # (ручной, пуш в ветку ci/**) собирают текущий коммит.
+  sync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    outputs:
+      build: ${{ steps.sync.outputs.build }}
+      ref: ${{ steps.sync.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Только для расписания и на main: подтянуть изменения upstream.
-      # Если новых коммитов нет, сборка пропускается.
       - name: Sync with upstream
         id: sync
         run: |
@@ -49,16 +45,46 @@ jobs:
               git push origin HEAD:main
             fi
           fi
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      # Сбой одной версии не должен отменять остальные.
+      fail-fast: false
+      matrix:
+        include:
+          # SHA-256 взяты из официальных sha256sums каждого релиза и на каждом
+          # запуске сверяются с ними заново (шаг Download SDK).
+          - version: '25.12.3'
+            sha256: 70fc990b2f9a2705e8bbca610e421a55e789901d4aeba10d9fdd7c89777bf695
+          - version: '25.12.4'
+            sha256: 28e004c1be4d215d19c1f12a6aa4c8d8f80689549eb707d0ff5a71f16fa8d05f
+          - version: '25.12.5'
+            sha256: 0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c
+          - version: '25.12.6'
+            sha256: 1864152619092e781fa36a401960c8e9ae42d6a364c44ee5f0b197ca5f3c0fcc
+    env:
+      SDK_VERSION: ${{ matrix.version }}
+      SDK_BASE: https://downloads.openwrt.org/releases/${{ matrix.version }}/targets/x86/64
+      SDK_ARCHIVE: openwrt-sdk-${{ matrix.version }}-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+      SDK_DIR: openwrt-sdk-${{ matrix.version }}-x86-64_gcc-14.3.0_musl.Linux-x86_64
+      SDK_SHA256: ${{ matrix.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.ref }}
 
       - name: Free disk space
-        if: steps.sync.outputs.build == 'true'
         run: |
           mkdir -p "$GITHUB_WORKSPACE/logs"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
       - name: Install build dependencies
-        if: steps.sync.outputs.build == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -67,7 +93,6 @@ jobs:
             rsync swig unzip zlib1g-dev file wget curl perl xz-utils zstd
 
       - name: Download SDK and verify SHA-256
-        if: steps.sync.outputs.build == 'true'
         run: |
           set -eu
           mkdir -p "$HOME/openwrt-build"
@@ -85,19 +110,39 @@ jobs:
           tar --zstd -xf "$SDK_ARCHIVE"
           test -x "$SDK_DIR/scripts/feeds"
 
-      - name: Pinned feeds and Go patch
-        if: steps.sync.outputs.build == 'true'
+      - name: Feeds of this release and Go patch
         run: |
           set -eu
           SDK="$HOME/openwrt-build/$SDK_DIR"
-          cp ci/feeds.conf.default "$SDK/feeds.conf.default"
           cd "$SDK"
+          # feeds.conf.default из SDK закреплён на коммиты именно этого релиза,
+          # поэтому отдельный файл с коммитами для каждой версии не нужен.
+          echo "== feeds.conf.default из SDK $SDK_VERSION"
+          cat feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          git -C feeds/packages apply "$GITHUB_WORKSPACE/ci/golang-changes.patch"
+
+          # warp-awg требует Go не ниже 1.26.3. В feeds 25.12.3 стоит 1.26.2,
+          # поэтому там применяем патч; если в feeds версии уже новее, патч не нужен.
+          mk=feeds/packages/lang/golang/golang1.26/Makefile
+          if [ ! -f "$mk" ]; then
+            echo "ОШИБКА: в feeds релиза $SDK_VERSION нет $mk. Нужна другая ветка golang (проверьте feeds вручную)."
+            exit 1
+          fi
+          cur=$(sed -n 's/^GO_VERSION_PATCH:=\([0-9][0-9]*\).*/\1/p' "$mk")
+          echo "golang1.26 в feeds релиза $SDK_VERSION: GO_VERSION_PATCH=${cur:-?}"
+          if [ -z "$cur" ]; then
+            echo "ОШИБКА: не удалось определить GO_VERSION_PATCH в $mk."
+            exit 1
+          fi
+          if [ "$cur" -ge 3 ]; then
+            echo "Go в feeds уже 1.26.$cur (не ниже 1.26.3): патч не применяем."
+          else
+            git -C feeds/packages apply "$GITHUB_WORKSPACE/ci/golang-changes.patch"
+            echo "Патч Go применён (1.26.$cur -> 1.26.3)."
+          fi
 
       - name: Install WARP packages into SDK
-        if: steps.sync.outputs.build == 'true'
         run: |
           set -eu
           SDK="$HOME/openwrt-build/$SDK_DIR"
@@ -130,7 +175,6 @@ jobs:
           cp -a Makefile htdocs root "$SDK/package/luci-app-warp/"
 
       - name: Minimal SDK config
-        if: steps.sync.outputs.build == 'true'
         run: |
           set -eu
           cd "$HOME/openwrt-build/$SDK_DIR"
@@ -158,7 +202,6 @@ jobs:
           fi
 
       - name: Build warp-awg
-        if: steps.sync.outputs.build == 'true'
         run: |
           cd "$HOME/openwrt-build/$SDK_DIR"
           make package/warp-awg/compile V=s -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/warp-awg.log" | tail -n 40
@@ -175,14 +218,12 @@ jobs:
           fi
 
       - name: Build warp-warpscout
-        if: steps.sync.outputs.build == 'true'
         run: |
           cd "$HOME/openwrt-build/$SDK_DIR"
           make package/warp-warpscout/compile V=s -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/warp-warpscout.log" | tail -n 40
           test "${PIPESTATUS[0]}" -eq 0
 
       - name: Build luci-app-warp
-        if: steps.sync.outputs.build == 'true'
         run: |
           cd "$HOME/openwrt-build/$SDK_DIR"
           make package/luci-app-warp/compile V=s -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/logs/luci-app-warp.log" | tail -n 40
@@ -190,7 +231,6 @@ jobs:
           echo "dl/: $(du -sh dl | cut -f1)"
 
       - name: Collect and check packages
-        if: steps.sync.outputs.build == 'true'
         run: |
           set -eu
           SDK="$HOME/openwrt-build/$SDK_DIR"
@@ -205,12 +245,51 @@ jobs:
           bash ci/check-packages.sh "$SDK" "$GITHUB_WORKSPACE/out"
 
       - name: Upload packages
-        if: steps.sync.outputs.build == 'true' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: warp-apk-x86_64-25.12.3
+          name: warp-apk-x86_64-${{ matrix.version }}
           path: |
             out/
             logs/
           if-no-files-found: warn
           retention-days: 30
+
+  # Релиз публикуется только если собрались ВСЕ версии из матрицы, и только
+  # для запусков на main (расписание или ручной). Сборки из веток ci/** остаются
+  # артефактами. Имена APK одинаковы у разных версий OpenWrt, поэтому к имени
+  # файла добавляется префикс версии.
+  release:
+    needs: [sync, build]
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: warp-apk-x86_64-*
+          path: artifacts
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ needs.sync.outputs.ref }}
+        run: |
+          set -eu
+          short=$(printf '%s' "$REF" | cut -c1-7)
+          tag="build-$short"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Релиз $tag уже существует, пропускаем."
+            exit 0
+          fi
+          mkdir -p rel
+          for d in artifacts/warp-apk-x86_64-*; do
+            v=${d##*-}
+            for f in "$d"/out/*.apk; do
+              cp "$f" "rel/openwrt-$v-$(basename "$f")"
+            done
+          done
+          (cd rel && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
+          ls -la rel
+          gh release create "$tag" rel/* --repo "$GITHUB_REPOSITORY" --target "$REF" \
+            --title "WARP для OpenWrt x86_64, сборка $short" \
+            --notes "Коммит $REF. APK для OpenWrt 25.12.3–25.12.6 (x86_64), имя файла начинается с openwrt-<версия>. Пакеты не подписаны постоянным ключом: ставить через apk add --allow-untrusted. Проверка: SHA256SUMS."
