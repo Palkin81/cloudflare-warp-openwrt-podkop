@@ -82,6 +82,10 @@ for pkg in warp-awg warp-warpscout luci-app-warp; do
     fi
   fi
 
+  # Для наглядности: как зависимости записаны в готовом пакете.
+  echo "--- зависимости $pkg (adbdump):"
+  "$APK" adbdump --allow-untrusted "$f" 2>/dev/null | grep -i -A10 -E '^ *depends:' | head -14
+
   rm -rf "$tmp" "$tmp.log"
 done
 

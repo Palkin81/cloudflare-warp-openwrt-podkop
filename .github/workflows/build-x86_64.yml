@@ -168,8 +168,10 @@ jobs:
           if ls dl | grep -q '^linux-firmware'; then
             echo "::warning::linux-firmware всё ещё скачивается при сборке warp-awg (замена зависимости kmod-tun не помогла)."
           fi
-          if grep -q 'package/kernel/linux' "$GITHUB_WORKSPACE/logs/warp-awg.log"; then
-            echo "::warning::При сборке warp-awg запускалась сборка package/kernel/linux."
+          # Ищем именно вход в каталог пакета: просто строка package/kernel/linux
+          # встречается и в безобидных сообщениях feeds (ложное срабатывание).
+          if grep -q -E "Entering directory .*(package/kernel/linux|firmware/linux-firmware)" "$GITHUB_WORKSPACE/logs/warp-awg.log"; then
+            echo "::warning::При сборке warp-awg запускалась сборка package/kernel/linux или linux-firmware."
           fi
 
       - name: Build warp-warpscout
