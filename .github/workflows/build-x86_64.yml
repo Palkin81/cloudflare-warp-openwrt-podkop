@@ -254,3 +254,42 @@ jobs:
             logs/
           if-no-files-found: warn
           retention-days: 30
+
+  # Релиз публикуется только если собрались ВСЕ версии из матрицы, и только
+  # для запусков на main (расписание или ручной). Сборки из веток ci/** остаются
+  # артефактами. Имена APK одинаковы у разных версий OpenWrt, поэтому к имени
+  # файла добавляется префикс версии.
+  release:
+    needs: [sync, build]
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: warp-apk-x86_64-*
+          path: artifacts
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ needs.sync.outputs.ref }}
+        run: |
+          set -eu
+          short=$(printf '%s' "$REF" | cut -c1-7)
+          tag="build-$short"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Релиз $tag уже существует, пропускаем."
+            exit 0
+          fi
+          mkdir -p rel
+          for d in artifacts/warp-apk-x86_64-*; do
+            v=${d##*-}
+            for f in "$d"/out/*.apk; do
+              cp "$f" "rel/openwrt-$v-$(basename "$f")"
+            done
+          done
+          (cd rel && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
+          ls -la rel
+          gh release create "$tag" rel/* --repo "$GITHUB_REPOSITORY" --target "$REF" \
+            --title "WARP для OpenWrt x86_64, сборка $short" \
+            --notes "Коммит $REF. APK для OpenWrt 25.12.3–25.12.6 (x86_64), имя файла начинается с openwrt-<версия>. Пакеты не подписаны постоянным ключом: ставить через apk add --allow-untrusted. Проверка: SHA256SUMS."
