@@ -118,7 +118,8 @@ jobs:
           mk="$SDK/package/warp-awg/Makefile"
           if grep -q ' +kmod-tun' "$mk"; then
             sed -i 's/ +kmod-tun//' "$mk"
-            sed -i '/^  DEPENDS:=/a\  EXTRA_DEPENDS:=kmod-tun' "$mk"
+            # SDK 25.12 требует у EXTRA_DEPENDS версионное ограничение, поэтому (>=0).
+            sed -i '/^  DEPENDS:=/a\  EXTRA_DEPENDS:=kmod-tun (>=0)' "$mk"
           else
             echo "::warning::В warp-awg/Makefile не найдено ' +kmod-tun': upstream мог изменить зависимости, проверьте ci/ и шаг подмены."
           fi
