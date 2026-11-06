@@ -15,6 +15,10 @@ jobs:
           tar --zstd -xf "$A"
           APK=$(pwd)/$(ls -d openwrt-sdk-*/ | head -1)staging_dir/host/bin/apk
           "$APK" --version
+          SD=$(pwd)/$(ls -d openwrt-sdk-*/ | head -1)
+          echo "== как SDK зовёт mkpkg / подпись"
+          grep -n -i "mkpkg\|BUILD_KEY_APK\|SIGNED_PACKAGES\|adbsign\|mkndx" "$SD"/include/package-pack.mk "$SD"/include/package-ipkg.mk "$SD"/package/Makefile "$SD"/Config.in "$SD"/rules.mk 2>/dev/null | cut -c1-240
+          ls -la "$SD"/*.pem 2>&1 | head
           W=$(mktemp -d); cd "$W"
           openssl ecparam -genkey -name prime256v1 -noout -out k.pem
           openssl ec -in k.pem -pubout -out p.pem
@@ -22,7 +26,7 @@ jobs:
           cp p.pem keys/p.pem; cp p.pem abskeys/p.pem
           "$APK" mkpkg --info name:t --info version:1-r1 --info arch:noarch --files src --output t.apk 2>&1 | tail -3
           echo "== unsigned verify (ожидаем UNTRUSTED):"; "$APK" verify --keys-dir "$W/abskeys" t.apk 2>&1 | tail -2
-          "$APK" adbsign --sign-key k.pem t.apk 2>&1 | tail -3; echo "adbsign rc=$?"
+          "$APK" adbsign --sign-key k.pem t.apk; echo "adbsign rc=$?"; ls -la t.apk
           for v in "--keys-dir keys" "--keys-dir $W/abskeys" "--root $W/r --keys-dir $W/abskeys" "--allow-untrusted"; do
             echo "== verify $v"; "$APK" verify $v t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
           done
@@ -31,3 +35,5 @@ jobs:
           "$APK" verify --keys-dir "$W/abskeys" t2.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
           echo "== trusted keys в корне"; mkdir -p r/etc/apk/keys; cp p.pem r/etc/apk/keys/
           "$APK" --root "$W/r" verify t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
+          echo "== adbsign поверх подписанного t2.apk"
+          "$APK" adbsign --sign-key k.pem t2.apk; echo "rc=$?"; "$APK" verify --keys-dir "$W/abskeys" t2.apk; echo "rc=$?"
