@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Try signing variants
         run: |
-          set -u
+          set -u; set +e
           B=https://downloads.openwrt.org/releases/25.12.6/targets/x86/64
           A=openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           curl -sfL -o "$A" "$B/$A"
