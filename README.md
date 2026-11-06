@@ -1,5 +1,7 @@
 # Cloudflare WARP · OpenWrt · Podkop
 
+> **Форк для OpenWrt 25.12 x86_64.** Готовые APK, подпись и описание сборки на GitHub Actions: [docs/FORK-X86_64.md](docs/FORK-X86_64.md).
+
 Отдельный WARP-туннель и русская страница LuCI для совместной работы с Podkop.
 Podkop выбирает сайты, WARP обслуживает только направленный в него трафик.
 
