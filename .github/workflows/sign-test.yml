@@ -1,0 +1,33 @@
+name: Sign test
+on:
+  push:
+    branches: ['ci/signtest']
+jobs:
+  t:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Try signing variants
+        run: |
+          set -u
+          B=https://downloads.openwrt.org/releases/25.12.6/targets/x86/64
+          A=openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          curl -sfL -o "$A" "$B/$A"
+          tar --zstd -xf "$A" --wildcards '*/staging_dir/host/bin/apk' '*/staging_dir/host/lib/*' 2>/dev/null || tar --zstd -xf "$A"
+          APK=$(pwd)/$(ls -d openwrt-sdk-*)/staging_dir/host/bin/apk
+          "$APK" --version
+          W=$(mktemp -d); cd "$W"
+          openssl ecparam -genkey -name prime256v1 -noout -out k.pem
+          openssl ec -in k.pem -pubout -out p.pem
+          mkdir -p src keys abskeys; echo hi > src/f
+          cp p.pem keys/p.pem; cp p.pem abskeys/p.pem
+          "$APK" mkpkg --info name:t --info version:1-r1 --info arch:noarch --files src --output t.apk 2>&1 | tail -3
+          echo "== unsigned verify (ожидаем UNTRUSTED):"; "$APK" verify --keys-dir "$W/abskeys" t.apk 2>&1 | tail -2
+          "$APK" adbsign --sign-key k.pem t.apk 2>&1 | tail -3; echo "adbsign rc=$?"
+          for v in "--keys-dir keys" "--keys-dir $W/abskeys" "--root $W/r --keys-dir $W/abskeys" "--allow-untrusted"; do
+            echo "== verify $v"; "$APK" verify $v t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
+          done
+          echo "== mkpkg with --sign-key"
+          "$APK" mkpkg --info name:t2 --info version:1-r1 --info arch:noarch --files src --sign-key k.pem --output t2.apk 2>&1 | tail -3
+          "$APK" verify --keys-dir "$W/abskeys" t2.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
+          echo "== trusted keys в корне"; mkdir -p r/etc/apk/keys; cp p.pem r/etc/apk/keys/
+          "$APK" --root "$W/r" verify t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
