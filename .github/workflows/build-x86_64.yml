@@ -1,4 +1,4 @@
-name: Build APK (OpenWrt 25.12.x x86_64)
+name: Build APK (OpenWrt 25.12 x86_64)
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
       build: ${{ steps.sync.outputs.build }}
       ref: ${{ steps.sync.outputs.ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -52,29 +52,18 @@ jobs:
     if: needs.sync.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
-    strategy:
-      # Сбой одной версии не должен отменять остальные.
-      fail-fast: false
-      matrix:
-        include:
-          # SHA-256 взяты из официальных sha256sums каждого релиза и на каждом
-          # запуске сверяются с ними заново (шаг Download SDK).
-          - version: '25.12.3'
-            sha256: 70fc990b2f9a2705e8bbca610e421a55e789901d4aeba10d9fdd7c89777bf695
-          - version: '25.12.4'
-            sha256: 28e004c1be4d215d19c1f12a6aa4c8d8f80689549eb707d0ff5a71f16fa8d05f
-          - version: '25.12.5'
-            sha256: 0c8df0151a1e88feb7c03d694d61f6a18d51872815b7c811d76e2b77504d5e9c
-          - version: '25.12.6'
-            sha256: 1864152619092e781fa36a401960c8e9ae42d6a364c44ee5f0b197ca5f3c0fcc
     env:
-      SDK_VERSION: ${{ matrix.version }}
-      SDK_BASE: https://downloads.openwrt.org/releases/${{ matrix.version }}/targets/x86/64
-      SDK_ARCHIVE: openwrt-sdk-${{ matrix.version }}-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-      SDK_DIR: openwrt-sdk-${{ matrix.version }}-x86-64_gcc-14.3.0_musl.Linux-x86_64
-      SDK_SHA256: ${{ matrix.sha256 }}
+      # Пакеты не привязаны к версии OpenWrt (Go-бинарники и скрипты), поэтому
+      # собираем один комплект на самом свежем SDK. SHA-256 взята из официальных
+      # sha256sums релиза и на каждом запуске сверяется с ними заново.
+      # Новая версия SDK: поменять три строки ниже.
+      SDK_VERSION: '25.12.6'
+      SDK_SHA256: 1864152619092e781fa36a401960c8e9ae42d6a364c44ee5f0b197ca5f3c0fcc
+      SDK_BASE: https://downloads.openwrt.org/releases/25.12.6/targets/x86/64
+      SDK_ARCHIVE: openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+      SDK_DIR: openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.sync.outputs.ref }}
 
@@ -174,6 +163,24 @@ jobs:
           # po/ не копируем: проверенная сборка тоже была без luci-i18n-warp-ru.
           cp -a Makefile htdocs root "$SDK/package/luci-app-warp/"
 
+      - name: Signing key
+        env:
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+        run: |
+          set -eu
+          cd "$HOME/openwrt-build/$SDK_DIR"
+          # Если секрет APK_SIGN_KEY задан, SDK подписывает пакеты постоянным ключом
+          # (EC prime256v1, PEM). Публичная часть выводится из приватной.
+          if [ -n "$APK_SIGN_KEY" ]; then
+            umask 077
+            printf '%s\n' "$APK_SIGN_KEY" > private-key.pem
+            openssl ec -in private-key.pem -pubout -out public-key.pem
+            echo "SIGNED=true" >> "$GITHUB_ENV"
+            echo "Ключ подписи из секрета подставлен в SDK."
+          else
+            echo "::notice::Секрет APK_SIGN_KEY не задан: пакеты не подписываются постоянным ключом (на роутере нужен --allow-untrusted)."
+          fi
+
       - name: Minimal SDK config
         run: |
           set -eu
@@ -240,33 +247,64 @@ jobs:
             [ -n "$f" ] || { echo "ОШИБКА: нет APK для $p"; exit 1; }
             cp -f "$f" out/
           done
-          # Публичный ключ SDK: нужен на роутере (/etc/apk/keys), если не используется --allow-untrusted.
-          cp -f "$SDK/public-key.pem" out/ 2>/dev/null || true
+          # Публичный ключ кладём рядом только для постоянного ключа: его нужно один раз
+          # положить на роутер в /etc/apk/keys. Одноразовый ключ SDK бесполезен.
+          if [ "${SIGNED:-}" = true ]; then cp -f "$SDK/public-key.pem" out/; fi
           bash ci/check-packages.sh "$SDK" "$GITHUB_WORKSPACE/out"
+
+      - name: Verify signature
+        run: |
+          set -eu
+          SDK="$HOME/openwrt-build/$SDK_DIR"
+          APK="$SDK/staging_dir/host/bin/apk"
+          "$APK" adbsign --help 2>&1 | head -15 || true
+          "$APK" verify --help 2>&1 | head -15 || true
+          if [ "${SIGNED:-}" = true ]; then
+            mkdir -p keys && cp "$SDK/public-key.pem" keys/
+            for f in out/*.apk; do
+              if "$APK" verify --keys-dir keys "$f"; then
+                echo "OK: $f подписан постоянным ключом"
+              else
+                echo "SDK не подписал отдельный пакет, подписываем вручную: $f"
+                "$APK" adbsign --sign-key "$SDK/private-key.pem" "$f"
+                "$APK" verify --keys-dir keys "$f"
+              fi
+            done
+            (cd out && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
+          else
+            # Пробный прогон на копии с одноразовым ключом: убеждаемся, что схема
+            # подписи работает, чтобы после добавления секрета она не сломалась.
+            mkdir -p t/keys && cd t
+            openssl ecparam -genkey -name prime256v1 -noout -out k.pem
+            openssl ec -in k.pem -pubout -out keys/p.pem
+            cp ../out/*.apk .
+            for f in *.apk; do
+              "$APK" adbsign --sign-key k.pem "$f" && "$APK" verify --keys-dir keys "$f" \
+                && echo "ПРОБА OK: $f" || echo "::warning::Пробная подпись $f не удалась."
+            done
+          fi
 
       - name: Upload packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: warp-apk-x86_64-${{ matrix.version }}
+          name: warp-apk-x86_64
           path: |
             out/
             logs/
           if-no-files-found: warn
           retention-days: 30
 
-  # Релиз публикуется только если собрались ВСЕ версии из матрицы, и только
-  # для запусков на main (расписание или ручной). Сборки из веток ci/** остаются
-  # артефактами. Имена APK одинаковы у разных версий OpenWrt, поэтому к имени
-  # файла добавляется префикс версии.
+  # Релиз публикуется только для запусков на main (расписание или ручной).
+  # Сборки из веток ci/** остаются артефактами.
   release:
     needs: [sync, build]
     if: needs.build.result == 'success' && github.ref == 'refs/heads/main' && github.event_name != 'push'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
-          pattern: warp-apk-x86_64-*
+          name: warp-apk-x86_64
           path: artifacts
 
       - name: Publish release
@@ -281,15 +319,13 @@ jobs:
             echo "Релиз $tag уже существует, пропускаем."
             exit 0
           fi
-          mkdir -p rel
-          for d in artifacts/warp-apk-x86_64-*; do
-            v=${d##*-}
-            for f in "$d"/out/*.apk; do
-              cp "$f" "rel/openwrt-$v-$(basename "$f")"
-            done
-          done
-          (cd rel && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
-          ls -la rel
-          gh release create "$tag" rel/* --repo "$GITHUB_REPOSITORY" --target "$REF" \
+          cd artifacts/out
+          ls -la
+          if [ -f public-key.pem ]; then
+            how="Пакеты подписаны: один раз положите public-key.pem в /etc/apk/keys/ на роутере, затем apk add ./*.apk."
+          else
+            how="Пакеты не подписаны постоянным ключом: ставить через apk add --allow-untrusted ./*.apk."
+          fi
+          gh release create "$tag" ./* --repo "$GITHUB_REPOSITORY" --target "$REF" \
             --title "WARP для OpenWrt x86_64, сборка $short" \
-            --notes "Коммит $REF. APK для OpenWrt 25.12.3–25.12.6 (x86_64), имя файла начинается с openwrt-<версия>. Пакеты не подписаны постоянным ключом: ставить через apk add --allow-untrusted. Проверка: SHA256SUMS."
+            --notes "Коммит $REF. Один комплект APK для OpenWrt 25.12.x (x86_64). $how Контрольные суммы: SHA256SUMS."
