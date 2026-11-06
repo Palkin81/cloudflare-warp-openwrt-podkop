@@ -1,7 +1,7 @@
 name: Sign test
 on:
   push:
-    branches: ['ci/signtest']
+    branches: ['signtest']
 jobs:
   t:
     runs-on: ubuntu-24.04
@@ -12,8 +12,8 @@ jobs:
           B=https://downloads.openwrt.org/releases/25.12.6/targets/x86/64
           A=openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           curl -sfL -o "$A" "$B/$A"
-          tar --zstd -xf "$A" --wildcards '*/staging_dir/host/bin/apk' '*/staging_dir/host/lib/*' 2>/dev/null || tar --zstd -xf "$A"
-          APK=$(pwd)/$(ls -d openwrt-sdk-*)/staging_dir/host/bin/apk
+          tar --zstd -xf "$A"
+          APK=$(pwd)/$(ls -d openwrt-sdk-*/ | head -1)staging_dir/host/bin/apk
           "$APK" --version
           W=$(mktemp -d); cd "$W"
           openssl ecparam -genkey -name prime256v1 -noout -out k.pem
