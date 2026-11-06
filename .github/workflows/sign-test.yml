@@ -22,18 +22,17 @@ jobs:
           W=$(mktemp -d); cd "$W"
           openssl ecparam -genkey -name prime256v1 -noout -out k.pem
           openssl ec -in k.pem -pubout -out p.pem
-          mkdir -p src keys abskeys; echo hi > src/f
-          cp p.pem keys/p.pem; cp p.pem abskeys/p.pem
-          "$APK" mkpkg --info name:t --info version:1-r1 --info arch:noarch --files src --output t.apk 2>&1 | tail -3
-          echo "== unsigned verify (ожидаем UNTRUSTED):"; "$APK" verify --keys-dir "$W/abskeys" t.apk 2>&1 | tail -2
-          "$APK" adbsign --sign-key k.pem t.apk; echo "adbsign rc=$?"; ls -la t.apk
-          for v in "--keys-dir keys" "--keys-dir $W/abskeys" "--root $W/r --keys-dir $W/abskeys" "--allow-untrusted"; do
-            echo "== verify $v"; "$APK" verify $v t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
-          done
-          echo "== mkpkg with --sign-key"
-          "$APK" mkpkg --info name:t2 --info version:1-r1 --info arch:noarch --files src --sign-key k.pem --output t2.apk 2>&1 | tail -3
-          "$APK" verify --keys-dir "$W/abskeys" t2.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
-          echo "== trusted keys в корне"; mkdir -p r/etc/apk/keys; cp p.pem r/etc/apk/keys/
-          "$APK" --root "$W/r" verify t.apk 2>&1 | tail -2; echo "rc=${PIPESTATUS[0]}"
-          echo "== adbsign поверх подписанного t2.apk"
-          "$APK" adbsign --sign-key k.pem t2.apk; echo "rc=$?"; "$APK" verify --keys-dir "$W/abskeys" t2.apk; echo "rc=$?"
+          mkdir -p src abskeys; echo hi > src/f; cp p.pem abskeys/p.pem
+          "$APK" mkpkg --info name:t --info version:1-r1 --info arch:noarch --files src --output t.apk
+          "$APK" verify --keys-dir "$W/abskeys" t.apk; echo "до подписи rc=$? (ожидаем 1)"
+          "$APK" adbsign --allow-untrusted --sign-key k.pem t.apk; echo "adbsign rc=$?"
+          "$APK" verify --keys-dir "$W/abskeys" t.apk; echo "после подписи rc=$? (ожидаем 0)"
+          "$APK" verify --keys-dir "$W/abskeys" --allow-untrusted t.apk; echo "rc=$?"
+          echo "== повторная подпись тем же ключом"
+          "$APK" adbsign --allow-untrusted --sign-key k.pem t.apk; "$APK" verify --keys-dir "$W/abskeys" t.apk; echo "rc=$?"
+          echo "== чужой ключ не должен проходить"
+          openssl ecparam -genkey -name prime256v1 -noout -out o.pem; openssl ec -in o.pem -pubout -out o.pub 2>/dev/null
+          mkdir -p otherkeys; cp o.pub otherkeys/; "$APK" verify --keys-dir "$W/otherkeys" t.apk; echo "rc=$? (ожидаем 1)"
+          echo "== установка с доверенным ключом в корне (как на роутере)"
+          mkdir -p r/etc/apk/keys; cp p.pem r/etc/apk/keys/
+          "$APK" --root "$W/r" --initdb add --no-scripts --no-network t.apk; echo "rc=$?"
