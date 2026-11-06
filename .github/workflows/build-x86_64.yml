@@ -252,36 +252,41 @@ jobs:
           if [ "${SIGNED:-}" = true ]; then cp -f "$SDK/public-key.pem" out/; fi
           bash ci/check-packages.sh "$SDK" "$GITHUB_WORKSPACE/out"
 
-      - name: Verify signature
+      - name: Sign and verify packages
         run: |
           set -eu
           SDK="$HOME/openwrt-build/$SDK_DIR"
           APK="$SDK/staging_dir/host/bin/apk"
-          "$APK" adbsign --help 2>&1 | head -15 || true
-          "$APK" verify --help 2>&1 | head -15 || true
+          # SDK подписывает только индекс репозитория (mkndx), отдельные APK остаются
+          # без подписи, поэтому подписываем их сами. adbsign сначала открывает файл и
+          # без --allow-untrusted портит неподписанный пакет (проверено пробным прогоном).
           if [ "${SIGNED:-}" = true ]; then
-            mkdir -p keys && cp "$SDK/public-key.pem" keys/
-            for f in out/*.apk; do
-              if "$APK" verify --keys-dir keys "$f"; then
-                echo "OK: $f подписан постоянным ключом"
-              else
-                echo "SDK не подписал отдельный пакет, подписываем вручную: $f"
-                "$APK" adbsign --sign-key "$SDK/private-key.pem" "$f"
-                "$APK" verify --keys-dir keys "$f"
-              fi
-            done
-            (cd out && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
+            key="$SDK/private-key.pem"; pub="$SDK/public-key.pem"; target="$GITHUB_WORKSPACE/out"
           else
-            # Пробный прогон на копии с одноразовым ключом: убеждаемся, что схема
-            # подписи работает, чтобы после добавления секрета она не сломалась.
-            mkdir -p t/keys && cd t
-            openssl ecparam -genkey -name prime256v1 -noout -out k.pem
-            openssl ec -in k.pem -pubout -out keys/p.pem
-            cp ../out/*.apk .
-            for f in *.apk; do
-              "$APK" adbsign --sign-key k.pem "$f" && "$APK" verify --keys-dir keys "$f" \
-                && echo "ПРОБА OK: $f" || echo "::warning::Пробная подпись $f не удалась."
-            done
+            # Секрета нет: проверяем схему на копии с одноразовым ключом, чтобы после
+            # добавления секрета она заведомо работала. Готовые пакеты не меняются.
+            T=$(mktemp -d)
+            openssl ecparam -genkey -name prime256v1 -noout -out "$T/k.pem"
+            openssl ec -in "$T/k.pem" -pubout -out "$T/p.pem"
+            mkdir "$T/pkg"; cp out/*.apk "$T/pkg/"
+            key="$T/k.pem"; pub="$T/p.pem"; target="$T/pkg"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/keys"; cp "$pub" "$GITHUB_WORKSPACE/keys/signer.pem"
+          for f in "$target"/*.apk; do
+            "$APK" adbsign --allow-untrusted --sign-key "$key" "$f"
+            "$APK" verify --keys-dir "$GITHUB_WORKSPACE/keys" "$f"
+            # Чужой ключ проходить не должен.
+            O=$(mktemp -d); openssl ecparam -genkey -name prime256v1 -noout -out "$O/o.pem"
+            openssl ec -in "$O/o.pem" -pubout -out "$O/signer.pem" 2>/dev/null
+            if "$APK" verify --keys-dir "$O" "$f" >/dev/null 2>&1; then
+              echo "ОШИБКА: $f проходит проверку чужим ключом"; exit 1
+            fi
+          done
+          if [ "${SIGNED:-}" = true ]; then
+            (cd out && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS)
+            echo "Пакеты подписаны и проверены."
+          else
+            echo "Пробная подпись и проверка прошли успешно (готовые пакеты не изменены)."
           fi
 
       - name: Upload packages
