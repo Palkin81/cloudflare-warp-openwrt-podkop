@@ -19,6 +19,48 @@ if uci -q get podkop.cfwarp >/dev/null; then
     printf '{"ok":true,"code":"already_attached"}\n'
     exit 0
 fi
+# Podkop PE (moz9/podkop-patch-subscriptions, 2026.11.14.x) applies a new section only through its
+# own Apply: its reload keeps the admitted runtime ("Saved runtime traffic context differs from
+# desired settings; keeping the running service unchanged") and returns 1, so the attach used to
+# roll back with podkop_restart_failed. Stock Podkop keeps the plain reload.
+podkop_bin=${WARP_PODKOP_BIN:-/usr/bin/podkop}
+podkop_has_apply() {
+    grep -q '^subscription_config_apply_start()' "$podkop_bin" 2>/dev/null &&
+        grep -q '^subscription_config_apply_status()' "$podkop_bin" 2>/dev/null
+}
+podkop_apply() {
+    tries=0
+    while :; do
+        reply=$("$podkop_bin" subscription_config_apply_start 2>/dev/null) || true
+        [ "$(printf '%s' "$reply" | jsonfilter -e '@.success' 2>/dev/null)" = true ] && break
+        # another Podkop operation (a background check, a subscription update) holds it: wait
+        [ "$(printf '%s' "$reply" | jsonfilter -e '@.error' 2>/dev/null)" = service_busy ] || return 1
+        tries=$((tries + 1))
+        [ "$tries" -lt 24 ] || return 1
+        sleep 5
+    done
+    waited=0
+    while [ "$waited" -lt 300 ]; do
+        sleep 3
+        waited=$((waited + 3))
+        case "$("$podkop_bin" subscription_config_apply_status 2>/dev/null | jsonfilter -e '@.state' 2>/dev/null)" in
+        done) return 0 ;;
+        failed) return 1 ;;
+        esac
+    done
+    return 1
+}
+podkop_activate() {
+    if podkop_has_apply; then
+        # The Apply of Podkop PE refuses to start while the shared Podkop operation lock is held
+        # (service_busy), and this attach holds it: the section is committed, so give it back.
+        # The Apply serializes itself against other Podkop operations.
+        warp_podkop_release
+        podkop_apply
+    else
+        PODKOP_SUBSCRIPTION_CACHE_ONLY=1 PODKOP_SKIP_LIST_UPDATE=1 "$podkop_bin" reload >/dev/null 2>&1
+    fi
+}
 warp_podkop_acquire || fail podkop_busy
 trap warp_podkop_release EXIT
 work=$(mktemp -d /tmp/warp-podkop.XXXXXX)
@@ -29,7 +71,9 @@ cleanup() {
         # CAS rollback: leave later user changes alone.
         if [ "$(sha256sum /etc/config/podkop | cut -d ' ' -f1)" = "$after" ]; then
             cp "$work/podkop" /etc/config/podkop
-            PODKOP_SUBSCRIPTION_CACHE_ONLY=1 PODKOP_SKIP_LIST_UPDATE=1 /usr/bin/podkop reload >/dev/null 2>&1 || true
+            # A failed Apply of Podkop PE keeps the previous runtime: putting the file back is enough.
+            podkop_has_apply ||
+                PODKOP_SUBSCRIPTION_CACHE_ONLY=1 PODKOP_SKIP_LIST_UPDATE=1 /usr/bin/podkop reload >/dev/null 2>&1 || true
         fi
     fi
     rm -rf "$work"
@@ -56,7 +100,7 @@ cp "$work/podkop" /etc/warp/podkop-before-attach.conf
 uci -q -t "$work/uci" commit podkop
 after=$(sha256sum /etc/config/podkop | cut -d ' ' -f1)
 committed=1
-PODKOP_SUBSCRIPTION_CACHE_ONLY=1 PODKOP_SKIP_LIST_UPDATE=1 /usr/bin/podkop reload >/dev/null 2>&1 || fail podkop_restart_failed
+podkop_activate || fail podkop_restart_failed
 /etc/init.d/sing-box status >/dev/null 2>&1 || fail podkop_restart_failed
 nft list table inet PodkopTable >/dev/null 2>&1 || fail podkop_restart_failed
 success=1

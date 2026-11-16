@@ -12,7 +12,7 @@ from pathlib import Path
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.1.12'
+VERSION = '0.1.13'
 BACKEND_VERSION = '0.1.0'
 
 def archive(entries):
