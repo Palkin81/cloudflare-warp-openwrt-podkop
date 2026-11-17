@@ -2,7 +2,7 @@
 # Pinned release; update unchanged backends only when their file hashes differ.
 set -eu
 umask 077
-VERSION=0.1.12
+VERSION=0.1.13
 BACKEND_VERSION=0.1.0
 BASE=https://github.com/moz9/cloudflare-warp-openwrt-podkop/releases/download/v$VERSION
 fail() { echo "CF WARP: $*" >&2; exit 1; }
